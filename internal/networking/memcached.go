@@ -1,4 +1,4 @@
-package main
+package networking
 
 import (
 	"bufio"
@@ -8,19 +8,26 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/gleicon/go-tinycache/internal/backend"
+	metrics "github.com/gleicon/go-tinycache/internal/metrics"
+	log "github.com/sirupsen/logrus"
 )
 
 /*
-MemcachedProtocolServer a protocol abstraction with db switching and ro mode
+MemcachedProtocolServer is a protocol abstraction
+with added db switching capabilities and read-only mode
 */
+
 type MemcachedProtocolServer struct {
 	readonly bool
+	metrics  *metrics.InternalMetrics
 }
 
 /*
 NewMemcachedProtocolServer creates a new protocol parser
 */
-func NewMemcachedProtocolServer(readonly bool) *MemcachedProtocolServer {
+func NewMemcachedProtocolServer(readonly bool, metrics *metrics.InternalMetrics) *MemcachedProtocolServer {
 	ms := MemcachedProtocolServer{readonly: readonly}
 	return &ms
 }
@@ -57,18 +64,20 @@ func (ms MemcachedProtocolServer) writeLine(buf *bufio.ReadWriter, s string) err
 func (ms MemcachedProtocolServer) checkRO(buf *bufio.ReadWriter) bool {
 	if ms.readonly {
 		ms.writeLine(buf, "ERROR")
-		readonlyErrors.Inc(1)
+		ms.metrics.ReadonlyErrors.Inc(1)
+		log.Error("Server is in read-only mode, command not allowed")
 	}
 	return ms.readonly
 }
 
 /*
-Parse memcachedprotocol and bind it with a DB Backend ops
+Parse memcachedprotocol, use the Backend Interface
+to execute commands regardless of the backend type
 */
-func (ms MemcachedProtocolServer) Parse(conn net.Conn, vdb BackendDatabase) {
-	totalThreads.Inc(1)
-	currThreads.Inc(1)
-	defer currThreads.Dec(1)
+func (ms MemcachedProtocolServer) Parse(conn net.Conn, vdb backend.BackendDatabase) {
+	ms.metrics.TotalThreads.Inc(1)
+	ms.metrics.CurrThreads.Inc(1)
+	defer ms.metrics.CurrThreads.Dec(1)
 	conn.SetReadDeadline(time.Now().Add(time.Second * 10))
 	defer conn.Close()
 	startTime := time.Now()
@@ -78,8 +87,8 @@ func (ms MemcachedProtocolServer) Parse(conn net.Conn, vdb BackendDatabase) {
 		line, err := ms.readLine(conn, buf)
 		if err != nil {
 			if err != io.EOF {
-				networkErrors.Inc(1)
-				log.Error("Connection closed: error %s\n", err)
+				ms.metrics.NetworkErrors.Inc(1)
+				log.Errorf("Connection closed: error %s\n", err)
 			}
 			return
 		}
@@ -87,7 +96,7 @@ func (ms MemcachedProtocolServer) Parse(conn net.Conn, vdb BackendDatabase) {
 		if line == nil {
 			if time.Now().Sub(startTime) > time.Second*3 {
 				conn.Close()
-				networkErrors.Inc(1)
+				ms.metrics.NetworkErrors.Inc(1)
 				log.Info("Closing idle connection after timeout")
 				return
 			}
@@ -98,7 +107,7 @@ func (ms MemcachedProtocolServer) Parse(conn net.Conn, vdb BackendDatabase) {
 		}
 
 		if len(line) < 3 || err != nil {
-			protocolErrors.Inc(1)
+			ms.metrics.ProtocolErrors.Inc(1)
 			ms.writeLine(buf, "ERROR")
 			continue
 		}
@@ -116,28 +125,28 @@ func (ms MemcachedProtocolServer) Parse(conn net.Conn, vdb BackendDatabase) {
 		case cmd == "get":
 			if len(args) < 2 {
 				ms.writeLine(buf, "ERROR")
-				protocolErrors.Inc(1)
+				ms.metrics.ProtocolErrors.Inc(1)
 				break
 			}
-			cmdGet.Inc(1)
+			ms.metrics.CmdGet.Inc(1)
 			for _, arg := range args[1:] {
 				if arg == " " || arg == "" {
 					break
 				}
 				v, err := vdb.Get([]byte(arg))
 				if v == nil {
-					getMisses.Inc(1)
+					ms.metrics.GetMisses.Inc(1)
 					continue
 				}
 				if err != nil {
-					log.Error("GET: %s", err)
+					log.Errorf("GET: %s", err)
 					break
 				}
 
 				if noreply == false {
 					ms.writeLine(buf, fmt.Sprintf("VALUE %s 0 %d", arg, len(v)))
 					ms.writeLine(buf, string(v))
-					getHits.Inc(1)
+					ms.metrics.GetHits.Inc(1)
 				}
 			}
 			if noreply == false {
@@ -150,25 +159,25 @@ func (ms MemcachedProtocolServer) Parse(conn net.Conn, vdb BackendDatabase) {
 			}
 			if len(args) < 2 {
 				ms.writeLine(buf, "ERROR")
-				protocolErrors.Inc(1)
+				ms.metrics.ProtocolErrors.Inc(1)
 				break
 			}
 			// retrieve body
 			body, err := ms.readLine(conn, buf)
 			if len(body) == 0 || err != nil {
 				ms.writeLine(buf, "ERROR")
-				protocolErrors.Inc(1)
+				ms.metrics.ProtocolErrors.Inc(1)
 			} else {
 				err = vdb.Set([]byte(args[1]), []byte(body))
 				if err != nil {
-					log.Error("SET: %s", err)
+					log.Errorf("SET: %s", err)
 					ms.writeLine(buf, "ERROR")
-					protocolErrors.Inc(1)
+					ms.metrics.ProtocolErrors.Inc(1)
 					break
 				}
-				cmdSet.Inc(1)
-				totalItems.Inc(1)
-				currItems.Inc(1)
+				ms.metrics.CmdSet.Inc(1)
+				ms.metrics.TotalItems.Inc(1)
+				ms.metrics.CurrItems.Inc(1)
 				if noreply == false {
 					ms.writeLine(buf, "STORED")
 				}
@@ -181,19 +190,19 @@ func (ms MemcachedProtocolServer) Parse(conn net.Conn, vdb BackendDatabase) {
 			}
 			if len(args) < 2 {
 				ms.writeLine(buf, "ERROR")
-				protocolErrors.Inc(1)
+				ms.metrics.ProtocolErrors.Inc(1)
 				break
 			}
 			// retrieve body
 			body, err := ms.readLine(conn, buf)
 			if len(body) == 0 || err != nil {
 				ms.writeLine(buf, "ERROR")
-				protocolErrors.Inc(1)
+				ms.metrics.ProtocolErrors.Inc(1)
 				break
 			} else {
 				err := vdb.Replace([]byte(args[1]), []byte(body))
 				if err != nil {
-					log.Error("REPLACE: %s", err)
+					log.Errorf("REPLACE: %s", err)
 					ms.writeLine(buf, "NOT_STORED")
 				} else {
 					ms.writeLine(buf, "STORED")
@@ -207,7 +216,7 @@ func (ms MemcachedProtocolServer) Parse(conn net.Conn, vdb BackendDatabase) {
 			}
 			if len(args) < 2 {
 				ms.writeLine(buf, "ERROR")
-				protocolErrors.Inc(1)
+				ms.metrics.ProtocolErrors.Inc(1)
 				break
 			}
 
@@ -215,12 +224,12 @@ func (ms MemcachedProtocolServer) Parse(conn net.Conn, vdb BackendDatabase) {
 			body, err := ms.readLine(conn, buf)
 			if len(body) == 0 || err != nil {
 				ms.writeLine(buf, "ERROR")
-				protocolErrors.Inc(1)
+				ms.metrics.ProtocolErrors.Inc(1)
 				break
 			} else {
 				err := vdb.Add([]byte(args[1]), []byte(body))
 				if err != nil {
-					log.Error("ADD: %s", err)
+					log.Errorf("ADD: %s", err)
 					ms.writeLine(buf, "NOT_STORED")
 				} else {
 					ms.writeLine(buf, "STORED")
@@ -231,7 +240,7 @@ func (ms MemcachedProtocolServer) Parse(conn net.Conn, vdb BackendDatabase) {
 		case cmd == "quit":
 			if len(args) > 1 {
 				ms.writeLine(buf, "ERROR")
-				protocolErrors.Inc(1)
+				ms.metrics.ProtocolErrors.Inc(1)
 				break
 			} else {
 				conn.Close()
@@ -241,7 +250,7 @@ func (ms MemcachedProtocolServer) Parse(conn net.Conn, vdb BackendDatabase) {
 		case cmd == "version":
 			if len(args) > 1 {
 				ms.writeLine(buf, "ERROR")
-				protocolErrors.Inc(1)
+				ms.metrics.ProtocolErrors.Inc(1)
 			} else {
 				ms.writeLine(buf, "VERSION BEANO")
 			}
@@ -258,7 +267,7 @@ func (ms MemcachedProtocolServer) Parse(conn net.Conn, vdb BackendDatabase) {
 		case cmd == "verbosity":
 			if len(args) < 2 || len(args) > 3 {
 				ms.writeLine(buf, "ERROR")
-				protocolErrors.Inc(1)
+				ms.metrics.ProtocolErrors.Inc(1)
 			} else {
 				ms.writeLine(buf, "OK")
 			}
@@ -270,13 +279,13 @@ func (ms MemcachedProtocolServer) Parse(conn net.Conn, vdb BackendDatabase) {
 			}
 			if len(args) < 2 || len(args) > 3 {
 				ms.writeLine(buf, "ERROR")
-				protocolErrors.Inc(1)
+				ms.metrics.ProtocolErrors.Inc(1)
 			} else {
 				err := ms.SwitchDB(args[1])
 				if err != nil {
 					ms.writeLine(buf, "ERROR")
-					protocolErrors.Inc(1)
-					log.Error("SWITCHDB: %s", err)
+					ms.metrics.ProtocolErrors.Inc(1)
+					log.Errorf("SWITCHDB: %s", err)
 				}
 				s := fmt.Sprintf("%s\nOK", args[1])
 				ms.writeLine(buf, s)
@@ -289,22 +298,22 @@ func (ms MemcachedProtocolServer) Parse(conn net.Conn, vdb BackendDatabase) {
 			}
 			if len(args) < 2 {
 				ms.writeLine(buf, "ERROR")
-				protocolErrors.Inc(1)
+				ms.metrics.ProtocolErrors.Inc(1)
 				break
 			}
 			if len(args) > 3 {
 				ms.writeLine(buf, "ERROR")
-				protocolErrors.Inc(1)
+				ms.metrics.ProtocolErrors.Inc(1)
 				break
 			}
 
 			deleted, err := vdb.Delete([]byte(args[1]), true)
 			if err != nil {
-				log.Error("DELETE: %s", err)
+				log.Errorf("DELETE: %s", err)
 			}
 			if deleted == true {
 				ms.writeLine(buf, "DELETED")
-				currItems.Dec(1)
+				ms.metrics.CurrItems.Dec(1)
 			} else if deleted == false {
 				ms.writeLine(buf, "NOT_FOUND")
 			}
@@ -313,7 +322,7 @@ func (ms MemcachedProtocolServer) Parse(conn net.Conn, vdb BackendDatabase) {
 		case cmd == "dbstats":
 			if len(args) > 1 {
 				ms.writeLine(buf, "ERROR")
-				protocolErrors.Inc(1)
+				ms.metrics.ProtocolErrors.Inc(1)
 			} else {
 				ms.writeLine(buf, "VERSION BEANO")
 			}
@@ -324,7 +333,7 @@ func (ms MemcachedProtocolServer) Parse(conn net.Conn, vdb BackendDatabase) {
 		case cmd == "range" || cmd == "gets":
 			if len(args) < 2 || len(args) > 3 {
 				ms.writeLine(buf, "ERROR")
-				protocolErrors.Inc(1)
+				ms.metrics.ProtocolErrors.Inc(1)
 				break
 			}
 			limit := -1
@@ -337,19 +346,19 @@ func (ms MemcachedProtocolServer) Parse(conn net.Conn, vdb BackendDatabase) {
 			}
 			v, err := vdb.Range([]byte(args[1]), limit, nil, false)
 			if err != nil {
-				log.Error("RANGE: %s", err)
+				log.Errorf("RANGE: %s", err)
 				break
 			}
 			if v == nil {
-				getMisses.Inc(1)
+				ms.metrics.GetMisses.Inc(1)
 				continue
 			}
-			cmdGet.Inc(1)
+			ms.metrics.CmdGet.Inc(1)
 			for key, value := range v {
 				if noreply == false {
 					ms.writeLine(buf, fmt.Sprintf("VALUE %s 0 %d", key, len(value)))
 					ms.writeLine(buf, string(value))
-					getHits.Inc(1)
+					ms.metrics.GetHits.Inc(1)
 				}
 			}
 			if noreply == false {
@@ -357,12 +366,12 @@ func (ms MemcachedProtocolServer) Parse(conn net.Conn, vdb BackendDatabase) {
 			}
 
 		default:
-			log.Error("NOT IMPLEMENTED: %s", args[0])
+			log.Errorf("NOT IMPLEMENTED: %s", args[0])
 			ms.writeLine(buf, "ERROR")
-			protocolErrors.Inc(1)
+			ms.metrics.ProtocolErrors.Inc(1)
 			break
 
 		}
-		responseTiming.Update(time.Since(startTime))
+		ms.metrics.ResponseTiming.Update(time.Since(startTime))
 	}
 }

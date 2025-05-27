@@ -1,4 +1,4 @@
-package main
+package backend
 
 import (
 	"fmt"
@@ -6,17 +6,17 @@ import (
 	"sync"
 
 	"github.com/boltdb/bolt"
-	bloom "github.com/pmylund/go-bloom"
+	bloom "github.com/gleicon/go-tinycache/internal/datautils"
 )
 
 type BloomFilterKeys struct {
-	cache     *bloom.CountingFilter
+	cache     *bloom.BloomFilter
 	bloomLock *sync.RWMutex
 }
 
 func NewBloomFilterKeys(maxKeysPerBucket int) *BloomFilterKeys {
 	me := BloomFilterKeys{cache: nil, bloomLock: &sync.RWMutex{}}
-	me.cache = bloom.NewCounting(maxKeysPerBucket, 0.01)
+	me.cache = bloom.NewBloomFilter(maxKeysPerBucket, 0.01)
 	return &me
 }
 
@@ -34,13 +34,13 @@ func (bf BloomFilterKeys) Remove(key []byte) {
 
 func (bf BloomFilterKeys) Reset() {
 	bf.bloomLock.Lock()
-	bf.cache.Reset()
+	bf.cache.Clear()
 	bf.bloomLock.Unlock()
 }
 
 func (bf BloomFilterKeys) Test(key []byte) bool {
 	bf.bloomLock.RLock()
-	r := bf.cache.Test(key)
+	r := bf.cache.Contains(key)
 	bf.bloomLock.RUnlock()
 	return r
 }
@@ -62,6 +62,7 @@ type KVBoltDBBackend struct {
 	maxKeysPerBucket int
 }
 
+// NewKVBoltDBBackend is the exported constructor for the BoltDB backend
 func NewKVBoltDBBackend(filename string, bucketName string, maxKeysPerBucket int) (*KVBoltDBBackend, error) {
 	var err error
 	b := KVBoltDBBackend{filename: filename, bucketName: bucketName, db: nil, expirationdb: nil, keyCache: nil, maxKeysPerBucket: maxKeysPerBucket}

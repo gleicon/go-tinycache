@@ -1,4 +1,4 @@
-package main
+package backend
 
 /*
  Backend interface

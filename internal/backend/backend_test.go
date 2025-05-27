@@ -1,16 +1,14 @@
-package main
+package backend
 
 import (
 	"fmt"
 	"math/rand"
-	"time"
 )
 
 var vboltdb *KVBoltDBBackend
 
 func init() {
 	vboltdb, _ = NewKVBoltDBBackend("bolt.db", "memcached", 10000)
-	rand.Seed(time.Now().UTC().UnixNano())
 }
 
 func randomString(l int) string {

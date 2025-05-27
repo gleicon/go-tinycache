@@ -1,6 +1,9 @@
-package main
+package backend
 
-import "testing"
+import (
+	"fmt"
+	"testing"
+)
 
 func TestBoltDBDelete(t *testing.T) {
 	key := []byte("beano")
@@ -108,7 +111,7 @@ func TestBoltDBDecr(t *testing.T) {
 	if err != nil {
 		t.Error(err)
 	} else if v != 9 {
-		t.Error(errUnexpected(string(v)))
+		t.Error(errUnexpected(fmt.Sprint(v)))
 	}
 
 	if v, err := vboltdb.Get(key); err != nil {
