@@ -28,7 +28,7 @@ type MemcachedProtocolServer struct {
 NewMemcachedProtocolServer creates a new protocol parser
 */
 func NewMemcachedProtocolServer(readonly bool, metrics *metrics.InternalMetrics) *MemcachedProtocolServer {
-	ms := MemcachedProtocolServer{readonly: readonly}
+	ms := MemcachedProtocolServer{readonly: readonly, metrics: metrics}
 	return &ms
 }
 
@@ -71,15 +71,18 @@ func (ms MemcachedProtocolServer) checkRO(buf *bufio.ReadWriter) bool {
 }
 
 /*
-Parse memcachedprotocol, use the Backend Interface
+Parse memcached ascii protocol, use the Backend Interface
 to execute commands regardless of the backend type
 */
 func (ms MemcachedProtocolServer) Parse(conn net.Conn, vdb backend.BackendDatabase) {
 	ms.metrics.TotalThreads.Inc(1)
 	ms.metrics.CurrThreads.Inc(1)
 	defer ms.metrics.CurrThreads.Dec(1)
+
 	conn.SetReadDeadline(time.Now().Add(time.Second * 10))
 	defer conn.Close()
+
+	log.Infof("New connection from %s", conn.RemoteAddr().String())
 	startTime := time.Now()
 	for {
 		buf := bufio.NewReadWriter(bufio.NewReader(conn), bufio.NewWriter(conn))
@@ -120,6 +123,7 @@ func (ms MemcachedProtocolServer) Parse(conn net.Conn, vdb backend.BackendDataba
 		} else {
 			noreply = false
 		}
+		log.Printf("Command: %s, noreply: %t, args: %v", cmd, noreply, args)
 
 		switch true {
 		case cmd == "get":
