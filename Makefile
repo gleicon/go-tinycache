@@ -15,3 +15,7 @@ test:
 	go test -v
 	rm bolt.db
 
+protocol_test:
+	go run tools/memcached_command_review.go
+
+.PHONY: all deps server clean test protocol_test

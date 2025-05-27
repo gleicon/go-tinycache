@@ -126,7 +126,7 @@ func (ms MemcachedProtocolServer) Parse(conn net.Conn, vdb backend.BackendDataba
 		log.Printf("Command: %s, noreply: %t, args: %v", cmd, noreply, args)
 
 		switch true {
-		case cmd == "get":
+		case cmd == "get" || cmd == "gets":
 			if len(args) < 2 {
 				ms.writeLine(buf, "ERROR")
 				ms.metrics.ProtocolErrors.Inc(1)
@@ -204,7 +204,15 @@ func (ms MemcachedProtocolServer) Parse(conn net.Conn, vdb backend.BackendDataba
 				ms.metrics.ProtocolErrors.Inc(1)
 				break
 			} else {
-				err := vdb.Replace([]byte(args[1]), []byte(body))
+				// do not replace if the key don't exist
+				v, err := vdb.Get([]byte(args[1]))
+				if v == nil {
+					ms.writeLine(buf, "NOT_STORED")
+					ms.metrics.ProtocolErrors.Inc(1)
+					continue
+				}
+
+				err = vdb.Replace([]byte(args[1]), []byte(body))
 				if err != nil {
 					log.Errorf("REPLACE: %s", err)
 					ms.writeLine(buf, "NOT_STORED")
@@ -231,7 +239,14 @@ func (ms MemcachedProtocolServer) Parse(conn net.Conn, vdb backend.BackendDataba
 				ms.metrics.ProtocolErrors.Inc(1)
 				break
 			} else {
-				err := vdb.Add([]byte(args[1]), []byte(body))
+				// do not add if the key already exists
+				v, err := vdb.Get([]byte(args[1]))
+				if v != nil {
+					ms.writeLine(buf, "NOT_STORED")
+					ms.metrics.ProtocolErrors.Inc(1)
+					continue
+				}
+				err = vdb.Add([]byte(args[1]), []byte(body))
 				if err != nil {
 					log.Errorf("ADD: %s", err)
 					ms.writeLine(buf, "NOT_STORED")
@@ -334,7 +349,7 @@ func (ms MemcachedProtocolServer) Parse(conn net.Conn, vdb backend.BackendDataba
 			ms.writeLine(buf, s)
 			ms.writeLine(buf, "OK")
 			break
-		case cmd == "range" || cmd == "gets":
+		case cmd == "range":
 			if len(args) < 2 || len(args) > 3 {
 				ms.writeLine(buf, "ERROR")
 				ms.metrics.ProtocolErrors.Inc(1)
