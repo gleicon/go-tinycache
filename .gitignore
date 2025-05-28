@@ -2,5 +2,5 @@
 beano
 src.test
 .vagrant
-go-tinycache
+./go-tinycache
 
